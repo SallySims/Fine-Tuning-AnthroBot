@@ -133,7 +133,9 @@ trainer_stats=trainer.train()
 trainer_stats
 
 ### Saving on Hugging Face
-model.push_hub("SallySims/AnthroBot")
+model.push_hub("SallySims/AnthroBot",
+                tokenizer,
+                token= "YOUR TOKEN")
 
 
 ### Testing the Newly generated Model
