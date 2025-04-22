@@ -1,0 +1,159 @@
+## importing the packages
+import pandas as pd
+import numpy as np
+import torch
+## Importing the Needed package
+import os
+from datasets import load_dataset
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer,TrainingArguments, pipeline, BitsAndBytesConfig
+from trl import SFTTrainer
+
+from huggingface_hub import login
+login(token="YOUR TOKEN")
+
+
+####Token
+Convo_T="YOUR TOKEN"
+
+# Create the quantization config (use 4-bit)
+quantization_config = BitsAndBytesConfig(
+    load_in_4bit=True,
+    llm_int8_enable_fp32_cpu_offload=True # Enable CPU offloading for layers that don't fit on the GPU
+)
+
+# Load Llama Model with quantization config
+model = AutoModelForCausalLM.from_pretrained(
+    "meta-llama/Llama-3.2-1B-Instruct", ## Instrut  or It models are perfect for fine-tuning  a  chat model because 
+    device_map="auto",
+    torch_dtype=torch.float16,  # or .bfloat16 if supported
+    trust_remote_code=True,
+    token=Convo_T
+)
+
+
+tokenizer=AutoTokenizer.from_pretrained(
+    "meta-llama/Llama-3.2-1B-Instruct",
+    token=Convo_T,
+    trust_remote_code=True
+)
+
+
+### Adding your data
+###Create a data library match the structure of system and user convo format
+ChatData=[]
+for index, row in ABioD.iterrows():  ## My data is ABioD
+  conversation={
+      "messages":[
+          {"role":"system", "content":"What can I help you with?"},
+          {"role": "user", "content": row["prompt"]},  ### prmopt was the column of basic anthropometric input
+          {"role": "assistant", "content": row["completion"]}  ### the column of response per the nbasic anthropometric inputs 
+      ]
+  }
+  ChatData.append(conversation)
+  ChatData
+
+## Optional
+### Saving to Hugging face format (JSON script)
+ChatDataAnthro=Dataset.from_list(ChatData)
+ChatDataAnthro.push_to_hub("SallySims/AnthroBotdata")
+
+### Adding Lora Adapters to the Model
+from peft import LoraConfig, get_peft_model, prepare_model_for_kbit_training, TaskType
+peft_config = LoraConfig(
+    r=16,
+    lora_alpha=32,
+    lora_dropout=0.05,
+    bias="none",
+    task_type=TaskType.CAUSAL_LM
+)
+
+model = get_peft_model(model, peft_config)
+
+
+######Preparing to train format
+
+EOS_TOKEN=tokenizer.eos_token
+EOS_TOKEN
+
+
+# Instead, tokenize question and answer separately and then concatenate the tokenized ids.
+def preprocess_function(examples):
+    convos=examples["messages"]
+    # Transofrm datset using the chat template
+    # Iterate through each conversation and apply the template to its messages
+    texts = []
+    for convo in convos:
+        formatted_text = tokenizer.apply_chat_template(
+            convo, tokenize=False, add_generation_prompt=False
+        )
+        texts.append(formatted_text)
+    return{"text":texts}
+
+
+### Trial of Sample 
+# Testing the Data
+for i, sample in enumerate(ChatDataAnthro):
+  print(f"\n----- Sample{i+1}----")
+  print(sample["text"])
+  if i>2:
+    break
+
+
+#### Fine Tuning The Model
+from transformers import TrainingArguments
+from trl import SFTTrainer
+
+# Correct TrainingArguments setup (removed `max_seq_length`)
+training_args = TrainingArguments(
+    output_dir="./outputs",
+    per_device_train_batch_size=2,
+    gradient_accumulation_steps=4,
+    num_train_epochs=5,
+    warmup_steps=5,
+    learning_rate=2e-4,
+    weight_decay=0.01,
+    logging_steps=1,
+    save_strategy="no",
+    fp16=not torch.cuda.is_bf16_supported(),
+    bf16=torch.cuda.is_bf16_supported(),
+    label_names=["labels"],  # ✅ Add this line
+)
+
+
+# Initialize trainer
+trainer = SFTTrainer(
+    model=model,
+    args=training_args,
+    train_dataset=ChatDataAnthro,
+)
+
+## Training
+trainer_stats=trainer.train()
+trainer_stats
+
+### Saving on Hugging Face
+model.push_hub("SallySims/AnthroBot")
+
+
+### Testing the Newly generated Model
+##### Tesing the New Model
+from transformers import pipeline, AutoModelForCausalLM
+messages=[
+    {"role":"user", "content": "Age: 30, Sex: male, Height: 170.0 cm, Weight: 70 kg, WC: 80s cm"},
+]
+
+inputs=tokenizer.apply_chat_template(
+    messages,
+    tokenize=True,
+    add_generation_prompt=True, #must add for generation
+    return_tensors="pt",).to("cuda")
+
+
+from transformers import TextStreamer
+text_streamer=TextStreamer(tokenizer)
+_=model.generate(inputs,
+                 streamer=text_streamer,
+                 max_new_tokens=250,
+                 use_cache=True)
+
